@@ -1,4 +1,4 @@
-import os, json, base64, re
+import os, json, base64
 from pathlib import Path
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,53 +10,65 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OUTPUT_DIR = Path("./generated_posts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-BRAND = "Arden Wood - меблі з масиву дуба, Ostrava CZ, ardenwood.eu"
+BRAND = "Arden Wood - меблi з масиву дуба, Ostrava CZ, ardenwood.eu. Стиль: премiум, натуральний."
 user_sessions = {}
 
 def get_session(uid):
     if uid not in user_sessions:
-        user_sessions[uid] = {"files":[],"description":"","step":"idle"}
+        user_sessions[uid] = {"files": [], "description": "", "step": "collecting"}
     return user_sessions[uid]
 
 async def cmd_start(update, ctx):
-    await update.message.reply_text("Привіт! Я SMM-агент Arden Wood.\n\n1. Надішли фото/відео\n2. Напиши опис\n3. Отримай готовий пост\n\n/new - новий пост\n/week - план на тиждень")
+    uid = update.effective_user.id
+    user_sessions[uid] = {"files": [], "description": "", "step": "collecting"}
+    await update.message.reply_text("Привiт! SMM-агент Arden Wood.\n\nНадiшли фото + напиши опис.\nЗгенерую пост Instagram (UA/CS/EN) та TikTok.\n\n/new - новий пост\n/week - план 7 днiв")
 
 async def cmd_new(update, ctx):
     uid = update.effective_user.id
-    user_sessions[uid] = {"files":[],"description":"","step":"collecting"}
-    await update.message.reply_text("Надсилай фото або відео!")
+    user_sessions[uid] = {"files": [], "description": "", "step": "collecting"}
+    await update.message.reply_text("Надсилай фото або вiдео!")
 
 async def handle_photo(update, ctx):
     uid = update.effective_user.id
     s = get_session(uid)
     photo = update.message.photo[-1]
     f = await ctx.bot.get_file(photo.file_id)
-    path = OUTPUT_DIR / f"{uid}_{datetime.now().strftime(chr(37)+chr(72)+chr(37)+chr(77)+chr(37)+chr(83))}.jpg"
-    await f.download_to_drive(path)
-    s["files"].append({"type":"photo","path":str(path),"file_id":photo.file_id})
-    await update.message.reply_text(f"Фото {len(s[chr(102)+chr(105)+chr(108)+chr(101)+chr(115)])} отримано! Напиши що на ньому.")
+    fname = OUTPUT_DIR / f"{uid}_{len(s['files'])}.jpg"
+    await f.download_to_drive(fname)
+    s["files"].append({"type": "photo", "path": str(fname)})
+    caption = update.message.caption or ""
+    if caption:
+        s["description"] = caption
+        await update.message.reply_text("Отримав! Генерую пост...")
+        await do_generate(ctx, uid, s, update.effective_chat.id)
+    else:
+        await update.message.reply_text(f"Фото {len(s['files'])} отримано!\nНапиши опис - i я одразу згенерую пост.")
 
 async def handle_video(update, ctx):
     uid = update.effective_user.id
     s = get_session(uid)
     video = update.message.video
     f = await ctx.bot.get_file(video.file_id)
-    path = OUTPUT_DIR / f"{uid}_{datetime.now().strftime(chr(37)+chr(72)+chr(37)+chr(77)+chr(37)+chr(83))}.mp4"
-    await f.download_to_drive(path)
-    s["files"].append({"type":"video","path":str(path),"duration":video.duration or 0})
-    await update.message.reply_text(f"Відео {video.duration}с! Напиши що на ньому.")
-
+    fname = OUTPUT_DIR / f"{uid}_{len(s['files'])}.mp4"
+    await f.download_to_drive(fname)
+    s["files"].append({"type": "video", "path": str(fname), "duration": video.duration or 0})
+    caption = update.message.caption or ""
+    if caption:
+        s["description"] = caption
+        await update.message.reply_text("Вiдео отримано! Генерую пост...")
+        await do_generate(ctx, uid, s, update.effective_chat.id)
+    else:
+        await update.message.reply_text("Вiдео отримано! Напиши опис.")
 async def handle_text(update, ctx):
     uid = update.effective_user.id
     s = get_session(uid)
     text = update.message.text.strip()
     if s["files"]:
         s["description"] = text
-        kb = [[InlineKeyboardButton("Генерувати пост", callback_data="gen")],[InlineKeyboardButton("Скасувати", callback_data="cancel")]]
-        await update.message.reply_text(f"Готово! {len(s[chr(102)+chr(105)+chr(108)+chr(101)+chr(115)])} фото/відео\nГенерувати?", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("Генерувати пост", callback_data="gen")],[InlineKeyboardButton("Додати фото", callback_data="more")]]
+        await update.message.reply_text(f"Є {len(s['files'])} фото. Опис: {text[:60]}\nГенерувати?", reply_markup=InlineKeyboardMarkup(kb))
     else:
-        await update.message.reply_text("Спочатку надішли фото або відео")
+        await update.message.reply_text("Надiшли спочатку фото або вiдео!\nМожеш надiслати фото одразу з пiдписом.")
 
 async def button_callback(update, ctx):
     q = update.callback_query
@@ -65,50 +77,63 @@ async def button_callback(update, ctx):
     s = get_session(uid)
     if q.data == "gen":
         await q.edit_message_text("Генерую... 20 секунд.")
-        await do_generate(q, ctx, uid, s)
-    elif q.data == "cancel":
-        user_sessions[uid] = {"files":[],"description":"","step":"idle"}
-        await q.edit_message_text("Скасовано. /new - новий пост.")
+        await do_generate(ctx, uid, s, q.message.chat_id)
+    elif q.data == "more":
+        await q.edit_message_text("Надсилай ще фото!")
     elif q.data == "new":
-        user_sessions[uid] = {"files":[],"description":"","step":"collecting"}
-        await q.edit_message_text("Надсилай нові фото!")
+        user_sessions[uid] = {"files": [], "description": "", "step": "collecting"}
+        await q.edit_message_text("Надсилай новi фото!")
 
-async def do_generate(q, ctx, uid, session):
-    desc = session.get("description","")
-    files = session.get("files",[])
+async def do_generate(ctx, uid, session, chat_id):
+    desc = session.get("description", "")
+    files = session.get("files", [])
     imgs = []
-    for pf in [f for f in files if f["type"]=="photo"][:2]:
+    for pf in [f for f in files if f["type"] == "photo"][:2]:
         try:
-            data = base64.standard_b64encode(open(pf["path"],"rb").read()).decode()
-            imgs.append({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":data}})
-        except: pass
-    prompt = f"""{BRAND}\nОпис: {desc}\nСтвори JSON без markdown:\n{{"posts":[{{"platform":"instagram","lang":"uk","text":"підпис","hashtags":"хештеги"}},{{"platform":"instagram","lang":"cs","text":"text","hashtags":"tagy"}},{{"platform":"tiktok","lang":"uk","text":"скрипт відео","hashtags":"теги","music":"назва музики"}}]}}"""
+            data = base64.standard_b64encode(open(pf["path"], "rb").read()).decode()
+            imgs.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
+        except:
+            pass
+    has_video = any(f["type"] == "video" for f in files)
+    video_note = " + є вiдео" if has_video else ""
+    prompt = (
+        f"{BRAND}\nОпис: {desc}{video_note}\n\n"
+        "Створи пости. ТIЛЬКИ JSON без markdown:\n"
+        '{"posts":['
+        '{"platform":"instagram","lang":"uk","text":"пiдпис 3-5 речень","hashtags":"15 хештегiв"},'
+        '{"platform":"instagram","lang":"cs","text":"2-3 vety","hashtags":"10 tagu"},'
+        '{"platform":"instagram","lang":"en","text":"2-3 sentences","hashtags":"10 tags"},'
+        '{"platform":"tiktok","lang":"uk","text":"Скрипт 20-30с покроково","hashtags":"8 хештегiв","music":"назва музики"}'
+        ']}'
+    )
     try:
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role":"user","content":imgs+[{"type":"text","text":prompt}]}])
-        raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
+        content = imgs + [{"type": "text", "text": prompt}]
+        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": content}])
+        raw = r.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         result = json.loads(raw)
-        chat_id = q.message.chat_id
-        icons = {"instagram":"📸","tiktok":"🎬"}
-        for post in result.get("posts",[]):
-            icon = icons.get(post["platform"],"✦")
-            music = f"\n🎵 {post[chr(109)+chr(117)+chr(115)+chr(105)+chr(99)]}" if post.get("music") else ""
-            msg = f"{icon} *{post[chr(112)+chr(108)+chr(97)+chr(116)+chr(102)+chr(111)+chr(114)+chr(109)].upper()} {post.get(chr(108)+chr(97)+chr(110)+chr(103),chr(32)).upper()}*\n\n{post.get(chr(116)+chr(101)+chr(120)+chr(116),chr(32))}\n\n{post.get(chr(104)+chr(97)+chr(115)+chr(104)+chr(116)+chr(97)+chr(103)+chr(115),chr(32))}{music}"
-            await ctx.bot.send_message(chat_id, msg[:4000], parse_mode="Markdown")
+        icons = {"instagram": "📸", "tiktok": "🎬"}
+        for post in result.get("posts", []):
+            icon = icons.get(post["platform"], "✦")
+            lang = post.get("lang", "").upper()
+            music = f"\n\n🎵 Музика: {post['music']}" if post.get("music") else ""
+            msg = f"{icon} *{post['platform'].upper()} {lang}*\n\n{post.get('text','')}\n\n{post.get('hashtags','')}{music}"
+            await ctx.bot.send_message(chat_id, msg[:4096], parse_mode="Markdown")
         kb = [[InlineKeyboardButton("Новий пост", callback_data="new")]]
-        await ctx.bot.send_message(chat_id, "Готово! Копіюй і публікуй.", reply_markup=InlineKeyboardMarkup(kb))
+        await ctx.bot.send_message(chat_id, "Готово! Копiюй i публiкуй.", reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
-        await q.message.reply_text(f"Помилка: {str(e)[:200]}")
-    user_sessions[uid] = {"files":[],"description":"","step":"idle"}
+        await ctx.bot.send_message(chat_id, f"Помилка: {str(e)[:300]}\n\nСпробуй /new")
+    user_sessions[uid] = {"files": [], "description": "", "step": "collecting"}
 
 async def cmd_week(update, ctx):
     await update.message.reply_text("Генерую план...")
-    prompt = f"{BRAND}\nКонтент-план 7 днів Instagram+TikTok. Щодня 1 пост кожної платформи. Чергуй: стіл-зигзаг, стелаж, двері, кухня, закулісся. Формат: День X - Тема\n📸 Instagram: опис\n🎬 TikTok: сценарій\n⏰ 18:00/19:30"
+    prompt = f"{BRAND}\nКонтент-план 7 днiв Instagram+TikTok. Щодня 1+1. Теми: стiл-зигзаг, стелаж, дверi, кухня, закулiсся, освiтнiй, промо.\nФормат:\nДень X (пн/вт...) - Тема\n📸 Instagram: що знiмати\n🎬 TikTok: сценарiй\n⏰ 18:00/19:30"
     try:
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role":"user","content":prompt}])
+        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": prompt}])
         plan = r.content[0].text
-        await update.message.reply_text(plan[:4000])
-        if len(plan) > 4000: await update.message.reply_text(plan[4000:8000])
-    except Exception as e: await update.message.reply_text(f"Помилка: {e}")
+        for i in range(0, min(len(plan), 8000), 4000):
+            await update.message.reply_text(plan[i:i+4000])
+    except Exception as e:
+        await update.message.reply_text(f"Помилка: {e}")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
