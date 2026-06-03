@@ -2,10 +2,9 @@ import os
 import io
 import base64
 import logging
-import httpx
+import json
 from pathlib import Path
-from PIL import Image, ImageEnhance, ImageFilter
-import rembg
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -19,9 +18,6 @@ TMP = Path("/tmp/photo_agent")
 TMP.mkdir(exist_ok=True)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-sessions = {}
-
-BRAND = "Arden Wood — меблі з масиву дуба, Ostrava CZ. Студійна фотографія для реклами."
 
 BACKGROUNDS = {
     "studio_white": (245, 245, 240),
@@ -37,7 +33,10 @@ BACKGROUND_LABELS = {
     "studio_dark": "⬛ Темний преміум",
     "studio_beige": "🟤 Бежевий натуральний",
     "studio_gray": "🔘 Сірий мінімалізм",
+    "auto": "✨ AI обере кращий",
 }
+
+sessions = {}
 
 
 def sess(uid):
@@ -52,10 +51,9 @@ async def cmd_start(update: Update, ctx):
     await update.message.reply_text(
         "📸 *Фото-агент Arden Wood*\n\n"
         "Надішли фото меблів — я:\n"
-        "• Приберу фон\n"
         "• Поставлю студійний фон\n"
-        "• Додам деталі за твоїми інструкціями\n"
-        "• Підготую для реклами\n\n"
+        "• Покращу яскравість і контраст\n"
+        "• Підготую для реклами 1080×1080\n\n"
         "Просто надішли фото!",
         parse_mode="Markdown"
     )
@@ -72,12 +70,10 @@ async def handle_photo(update: Update, ctx):
         s["photo_path"] = str(path)
         s["instructions"] = (update.message.caption or "").strip()
 
-        # Показуємо вибір фону
         kb = [
             [InlineKeyboardButton(BACKGROUND_LABELS[k], callback_data=f"bg_{k}")]
             for k in BACKGROUNDS
         ]
-        kb.append([InlineKeyboardButton("✨ AI сам обере кращий", callback_data="bg_auto")])
         await update.message.reply_text(
             "Фото отримано! Обери фон:",
             reply_markup=InlineKeyboardMarkup(kb)
@@ -93,17 +89,11 @@ async def handle_text(update: Update, ctx):
     if not s["photo_path"]:
         await update.message.reply_text("Спочатку надішли фото!")
         return
-    if s["bg"]:
-        # Є фото і фон — додаткові інструкції для обробки
-        s["instructions"] = update.message.text.strip()
-        await update.message.reply_text("Застосовую інструкції, зачекай...")
-        await process_photo(ctx, uid, update.effective_chat.id)
-    else:
-        s["instructions"] = update.message.text.strip()
-        await update.message.reply_text("Інструкції збережено. Тепер обери фон або надішли нове фото.")
+    s["instructions"] = update.message.text.strip()
+    await update.message.reply_text("Інструкції збережено. Тепер обери фон.")
 
 
-async def btn(update: Update, ctx):
+async def btn_handler(update: Update, ctx):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -116,56 +106,59 @@ async def btn(update: Update, ctx):
         if not s["photo_path"]:
             await q.edit_message_text("Спочатку надішли фото!")
             return
-        instr = s["instructions"]
-        if instr:
-            await q.edit_message_text(f"Фон: {BACKGROUND_LABELS.get(bg_key, 'Auto')}\nІнструкції: {instr}\n\nОбробляю...")
-        else:
-            await q.edit_message_text(f"Фон: {BACKGROUND_LABELS.get(bg_key, 'Auto')}\n\nОбробляю...")
+        await q.edit_message_text(f"Фон: {BACKGROUND_LABELS.get(bg_key, bg_key)}\nОбробляю... ⏳")
         await process_photo(ctx, uid, chat_id)
 
     elif q.data == "new":
         sessions[uid] = {"photo_path": None, "instructions": "", "bg": None}
         await q.edit_message_text("Готово! Надсилай нове фото.")
 
+    elif q.data == "change_bg":
+        kb = [
+            [InlineKeyboardButton(BACKGROUND_LABELS[k], callback_data=f"bg_{k}")]
+            for k in BACKGROUNDS
+        ]
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
+
 
 async def process_photo(ctx, uid, chat_id):
     s = sess(uid)
     photo_path = s["photo_path"]
     instructions = s["instructions"]
-    bg_key = s["bg"]
+    bg_key = s.get("bg", "studio_warm")
 
     try:
         await ctx.bot.send_chat_action(chat_id, "upload_photo")
 
-        # 1. Завантажуємо оригінал
-        img = Image.open(photo_path).convert("RGBA")
+        # Завантажуємо оригінал
+        img = Image.open(photo_path).convert("RGB")
+        W_orig, H_orig = img.size
 
-        # 2. Аналізуємо фото через Claude
-        with open(photo_path, "rb") as f:
-            img_data = base64.standard_b64encode(f.read()).decode()
+        # Кодуємо для Claude
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        img_data = base64.standard_b64encode(buf.getvalue()).decode()
 
-        analysis_prompt = (
-            f"{BRAND}\n"
-            f"Користувач надіслав фото меблів з інструкціями: '{instructions or 'немає'}'\n"
-            f"Вибраний фон: {BACKGROUND_LABELS.get(bg_key, 'авто')}\n\n"
-            "Як дизайнер-фотограф, опиши:\n"
-            "1. Що на фото (який меблевий виріб)\n"
-            "2. Яскравість/контраст який потрібно застосувати (числа 0.5-2.0)\n"
-            "3. Чи потрібна тінь під предметом (так/ні)\n"
-            "4. Яке вирівнювання предмету (ліво/центр/право)\n"
-            "Відповідай ТІЛЬКИ JSON: {\"item\":\"...\",\"brightness\":1.1,\"contrast\":1.2,\"shadow\":true,\"align\":\"center\"}"
+        # Запитуємо Claude про параметри обробки
+        prompt = (
+            "Ти дизайнер-фотограф для меблевого бренду Arden Wood.\n"
+            f"Інструкції від користувача: '{instructions or 'немає'}'\n"
+            f"Вибраний фон: {BACKGROUND_LABELS.get(bg_key, bg_key)}\n\n"
+            "Проаналізуй фото і дай параметри обробки.\n"
+            "Відповідай ТІЛЬКИ JSON без markdown:\n"
+            '{"item":"назва предмету","brightness":1.05,"contrast":1.15,"shadow":true,"crop_ratio":0.8}'
+            "\nbrightness: 0.8-1.3, contrast: 0.9-1.4, shadow: true/false, crop_ratio: 0.6-0.95 (частина висоти яку займає предмет)"
         )
 
         r = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=300,
+            max_tokens=200,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_data}},
-                {"type": "text", "text": analysis_prompt}
+                {"type": "text", "text": prompt}
             ]}]
         )
 
-        import json
         raw = r.content[0].text.strip()
         if "```" in raw:
             raw = raw.split("```")[1]
@@ -174,123 +167,90 @@ async def process_photo(ctx, uid, chat_id):
         params = json.loads(raw.strip())
         logger.info(f"AI params: {params}")
 
-        # 3. Прибираємо фон (rembg)
-        await ctx.bot.send_chat_action(chat_id, "upload_photo")
-        with open(photo_path, "rb") as f:
-            no_bg_data = rembg.remove(f.read())
-        subject = Image.open(io.BytesIO(no_bg_data)).convert("RGBA")
-
-        # 4. Визначаємо колір фону
+        # Визначаємо колір фону
         if bg_key == "auto":
-            # Claude обрав — беремо теплий для дерева
             bg_color = BACKGROUNDS["studio_warm"]
+            bg_key_display = "studio_warm"
         else:
-            bg_color = BACKGROUNDS.get(bg_key, BACKGROUNDS["studio_white"])
+            bg_color = BACKGROUNDS.get(bg_key, BACKGROUNDS["studio_warm"])
+            bg_key_display = bg_key
 
-        # 5. Створюємо фінальне зображення
-        W, H = 1080, 1080  # Instagram square
-        canvas = Image.new("RGBA", (W, H), (*bg_color, 255))
+        # Створюємо 1080x1080 полотно
+        W, H = 1080, 1080
+        canvas = Image.new("RGB", (W, H), bg_color)
 
-        # Масштабуємо предмет — займає 75% висоти
-        sw, sh = subject.size
-        scale = min((W * 0.75) / sw, (H * 0.75) / sh)
-        new_w, new_h = int(sw * scale), int(sh * scale)
-        subject = subject.resize((new_w, new_h), Image.LANCZOS)
+        # Масштабуємо оригінальне фото — предмет займає ~70% висоти
+        crop_ratio = params.get("crop_ratio", 0.8)
+        target_h = int(H * 0.70)
+        target_w = int(W * 0.80)
+        scale = min(target_w / W_orig, target_h / H_orig)
+        new_w = int(W_orig * scale)
+        new_h = int(H_orig * scale)
+        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
 
-        # Позиціонуємо
-        align = params.get("align", "center")
-        if align == "left":
-            x = int(W * 0.1)
-        elif align == "right":
-            x = int(W * 0.9 - new_w)
-        else:
-            x = (W - new_w) // 2
-        y = (H - new_h) // 2 + int(H * 0.03)  # трохи нижче центру
+        # Центруємо трохи нижче центру
+        x = (W - new_w) // 2
+        y = (H - new_h) // 2 + 20
 
-        # 6. Тінь під предметом
+        # Тінь
         if params.get("shadow", True):
-            shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            shadow_ellipse = Image.new("RGBA", (new_w, int(new_h * 0.08)), (0, 0, 0, 0))
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(shadow_ellipse)
-            draw.ellipse([0, 0, new_w, int(new_h * 0.08)], fill=(0, 0, 0, 60))
-            shadow_ellipse = shadow_ellipse.filter(ImageFilter.GaussianBlur(15))
-            shadow.paste(shadow_ellipse, (x, y + new_h - int(new_h * 0.04)), shadow_ellipse)
-            shadow = shadow.filter(ImageFilter.GaussianBlur(8))
-            canvas = Image.alpha_composite(canvas, shadow)
+            shadow_layer = Image.new("RGB", (W, H), bg_color)
+            shadow_draw = ImageDraw.Draw(shadow_layer)
+            shadow_w = int(new_w * 0.85)
+            shadow_h = int(new_h * 0.06)
+            shadow_x = x + (new_w - shadow_w) // 2
+            shadow_y = y + new_h - shadow_h // 2
+            shadow_draw.ellipse(
+                [shadow_x, shadow_y, shadow_x + shadow_w, shadow_y + shadow_h],
+                fill=tuple(max(0, c - 30) for c in bg_color)
+            )
+            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(20))
+            canvas = Image.blend(canvas, shadow_layer, 0.5)
 
-        # 7. Вставляємо предмет
-        canvas.paste(subject, (x, y), subject)
+        # Вставляємо фото
+        canvas.paste(img_resized, (x, y))
 
-        # 8. Корекція яскравості/контрасту
-        canvas_rgb = canvas.convert("RGB")
+        # Корекція
         brightness = params.get("brightness", 1.05)
-        contrast = params.get("contrast", 1.1)
-        canvas_rgb = ImageEnhance.Brightness(canvas_rgb).enhance(brightness)
-        canvas_rgb = ImageEnhance.Contrast(canvas_rgb).enhance(contrast)
+        contrast = params.get("contrast", 1.15)
+        canvas = ImageEnhance.Brightness(canvas).enhance(brightness)
+        canvas = ImageEnhance.Contrast(canvas).enhance(contrast)
 
-        # 9. Зберігаємо і відправляємо
+        # Зберігаємо
         out_path = TMP / f"{uid}_result.jpg"
-        canvas_rgb.save(out_path, "JPEG", quality=95)
+        canvas.save(out_path, "JPEG", quality=95)
 
         item_name = params.get("item", "меблевий виріб")
-        caption = f"✅ Готово! {item_name.capitalize()}, фон: {BACKGROUND_LABELS.get(bg_key, 'авто')}"
+        caption = f"✅ {item_name.capitalize()}\nФон: {BACKGROUND_LABELS.get(bg_key_display, '')}"
         if instructions:
-            caption += f"\nІнструкції: {instructions}"
+            caption += f"\n💬 {instructions}"
 
         kb = [
             [
                 InlineKeyboardButton("🔄 Інший фон", callback_data="change_bg"),
-                InlineKeyboardButton("📝 Нові інструкції", callback_data="new_instructions"),
-            ],
-            [InlineKeyboardButton("🆕 Нове фото", callback_data="new")]
+                InlineKeyboardButton("🆕 Нове фото", callback_data="new"),
+            ]
         ]
 
         with open(out_path, "rb") as f:
-            await ctx.bot.send_photo(chat_id, f, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+            await ctx.bot.send_photo(
+                chat_id, f,
+                caption=caption,
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
 
     except Exception as e:
         logger.error(f"process_photo: {e}", exc_info=True)
-        await ctx.bot.send_message(chat_id, f"Помилка обробки: {str(e)[:300]}\n\nСпробуй /start")
+        await ctx.bot.send_message(chat_id, f"Помилка: {str(e)[:300]}\n\nСпробуй /start")
     finally:
         sessions[uid] = {"photo_path": photo_path, "instructions": instructions, "bg": bg_key}
-
-
-async def btn_change_bg(update: Update, ctx):
-    """Повторний вибір фону для того ж фото"""
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
-    s = sess(uid)
-    if not s["photo_path"]:
-        await q.edit_message_text("Надішли нове фото!")
-        return
-    kb = [
-        [InlineKeyboardButton(BACKGROUND_LABELS[k], callback_data=f"bg_{k}")]
-        for k in BACKGROUNDS
-    ]
-    kb.append([InlineKeyboardButton("✨ AI сам обере кращий", callback_data="bg_auto")])
-    await q.edit_message_text("Обери інший фон:", reply_markup=InlineKeyboardMarkup(kb))
-
-
-async def btn_handler(update: Update, ctx):
-    q = update.callback_query
-    if q.data == "change_bg":
-        await btn_change_bg(update, ctx)
-    elif q.data == "new_instructions":
-        await q.answer()
-        uid = q.from_user.id
-        sess(uid)
-        await q.edit_message_caption(
-            caption="Напиши нові інструкції для обробки (наприклад: 'додай більше контрасту, посунь вліво')"
-        )
-    else:
-        await btn(update, ctx)
 
 
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN_PHOTO is not set!")
+    if not ANTHROPIC_KEY:
+        raise ValueError("ANTHROPIC_API_KEY is not set!")
     logger.info("Photo Agent Bot starting...")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
