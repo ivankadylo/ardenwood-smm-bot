@@ -25,7 +25,7 @@ async def cmd_start(update, ctx):
     uid = update.effective_user.id
     sessions[uid] = {"files": [], "desc": ""}
     await update.message.reply_text(
-        "SMM-агент Arden Wood\n\nНадiшли фото з пiдписом - отримаєш пост для Instagram та TikTok.\n\n/new - новий пост\n/week - план на 7 днiв"
+        "SMM-агент Arden Wood\n\nНадiшли фото з пiдписом - отримаєш пост.\n\n/new - новий пост\n/week - план 7 днiв"
     )
 
 
@@ -63,7 +63,7 @@ async def handle_text(update, ctx):
         await update.message.reply_text("Генерую пост...")
         await generate(ctx, uid, update.effective_chat.id)
     else:
-        await update.message.reply_text("Надiшли спочатку фото!\nМожеш надiслати фото одразу з пiдписом.")
+        await update.message.reply_text("Надiшли спочатку фото!")
 
 
 async def generate(ctx, uid, chat_id):
@@ -79,7 +79,7 @@ async def generate(ctx, uid, chat_id):
             pass
     prompt = (
         f"{BRAND}\nОпис: {desc}\n\n"
-        "Створи пости. Вiдповiдай ТIЛЬКИ JSON без markdown:\n"
+        "Створи пости ТIЛЬКИ JSON без markdown:\n"
         '{"posts":['
         '{"platform":"instagram","lang":"uk","text":"пiдпис 3-5 речень","hashtags":"15 хештегiв"},'
         '{"platform":"instagram","lang":"cs","text":"2-3 vety","hashtags":"10 tagu"},'
@@ -89,13 +89,17 @@ async def generate(ctx, uid, chat_id):
     )
     try:
         content = imgs + [{"type": "text", "text": prompt}]
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": content}])
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": content}]
+        )
         raw = r.content[0].text.strip().replace("\u0060\u0060\u0060json", "").replace("\u0060\u0060\u0060", "").strip()
         result = json.loads(raw)
         for post in result.get("posts", []):
             icon = "\ud83d\udcf8" if post["platform"] == "instagram" else "\ud83c\udfa6"
             lang = post.get("lang", "").upper()
-            music = f"\n\n\ud83c\udfb5 Музика: {post['music']}" if post.get("music") else ""
+            music = f"\n\n\ud83c\udfb5 {post['music']}" if post.get("music") else ""
             msg = f"{icon} *{post['platform'].upper()} {lang}*\n\n{post.get('text', '')}\n\n{post.get('hashtags', '')}{music}"
             await ctx.bot.send_message(chat_id, msg[:4096], parse_mode="Markdown")
         kb = [[InlineKeyboardButton("Новий пост", callback_data="new")]]
@@ -115,10 +119,14 @@ async def btn(update, ctx):
 
 
 async def cmd_week(update, ctx):
-    await update.message.reply_text("Генерую план на 7 днiв...")
-    prompt = f"{BRAND}\nКонтент-план 7 днiв Instagram+TikTok. Теми: стiл-зигзаг, стелаж, дверi, кухня, закулiсся, освiтнiй, промо.\nДень X - Тема\n\ud83d\udcf8 Instagram: iдея\n\ud83c\udfa6 TikTok: сценарiй\n\u23f0 18:00/19:30"
+    await update.message.reply_text("Генерую план...")
+    prompt = f"{BRAND}\nКонтент-план 7 днiв Instagram+TikTok. Теми: стiл-зигзаг, стелаж, дверi, кухня, закулiсся, освiтнiй, промо.\nДень X - Тема\n\ud83d\udcf8 Instagram\n\ud83c\udfa6 TikTok\n\u23f0 18:00/19:30"
     try:
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": prompt}])
+        r = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
         plan = r.content[0].text
         for i in range(0, min(len(plan), 8000), 4000):
             await update.message.reply_text(plan[i:i + 4000])
