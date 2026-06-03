@@ -1,4 +1,6 @@
-import os, json, base64
+import os
+import json
+import base64
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -12,27 +14,26 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 BRAND = "Arden Wood - меблi з масиву дуба, Ostrava CZ, ardenwood.eu. Стиль: премiум, натуральний, авторський."
 sessions = {}
 
+
 def sess(uid):
     if uid not in sessions:
         sessions[uid] = {"files": [], "desc": ""}
     return sessions[uid]
 
+
 async def cmd_start(update, ctx):
     uid = update.effective_user.id
     sessions[uid] = {"files": [], "desc": ""}
     await update.message.reply_text(
-        "SMM-агент Arden Wood\n\n"
-        "Як користуватись:\n"
-        "- Надiшли фото з пiдписом одним повiдомленням\n"
-        "- Або спочатку фото, потiм текст\n\n"
-        "/new - скинути i почати заново\n"
-        "/week - план на тиждень"
+        "SMM-агент Arden Wood\n\nНадiшли фото з пiдписом - отримаєш пост для Instagram та TikTok.\n\n/new - новий пост\n/week - план на 7 днiв"
     )
+
 
 async def cmd_new(update, ctx):
     uid = update.effective_user.id
     sessions[uid] = {"files": [], "desc": ""}
     await update.message.reply_text("Готово! Надсилай фото.")
+
 
 async def handle_photo(update, ctx):
     uid = update.effective_user.id
@@ -49,9 +50,9 @@ async def handle_photo(update, ctx):
         await generate(ctx, uid, update.effective_chat.id)
     else:
         await update.message.reply_text(
-            f"Фото {len(s['files'])} збережено.\n"
-            "Напиши опис - i я одразу згенерую пост."
+            f"Фото {len(s['files'])} збережено.\nНапиши опис - i я одразу згенерую пост."
         )
+
 
 async def handle_text(update, ctx):
     uid = update.effective_user.id
@@ -62,10 +63,8 @@ async def handle_text(update, ctx):
         await update.message.reply_text("Генерую пост...")
         await generate(ctx, uid, update.effective_chat.id)
     else:
-        await update.message.reply_text(
-            "Спочатку надiшли фото!\n"
-            "Можеш надiслати фото одразу з пiдписом."
-        )
+        await update.message.reply_text("Надiшли спочатку фото!\nМожеш надiслати фото одразу з пiдписом.")
+
 
 async def generate(ctx, uid, chat_id):
     s = sess(uid)
@@ -76,38 +75,35 @@ async def generate(ctx, uid, chat_id):
         try:
             data = base64.standard_b64encode(open(path, "rb").read()).decode()
             imgs.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
-        except:
+        except Exception:
             pass
     prompt = (
         f"{BRAND}\nОпис: {desc}\n\n"
         "Створи пости. Вiдповiдай ТIЛЬКИ JSON без markdown:\n"
         '{"posts":['
-        '{"platform":"instagram","lang":"uk","text":"пiдпис 3-5 речень емоцiйно","hashtags":"15 хештегiв"},'
-        '{"platform":"instagram","lang":"cs","text":"2-3 vety o produktu","hashtags":"10 ceskich tagu"},'
-        '{"platform":"instagram","lang":"en","text":"2-3 sentences about the piece","hashtags":"10 english tags"},'
-        '{"platform":"tiktok","lang":"uk","text":"Скрипт 20-30с:\n[0-3с] що показати\n[3-15с] що сказати\n[15-25с] деталi\n[25-30с] заклик писати в DM","hashtags":"8 тiкток хештегiв","music":"назва пiснi для фону"}'
-        "]}"
+        '{"platform":"instagram","lang":"uk","text":"пiдпис 3-5 речень","hashtags":"15 хештегiв"},'
+        '{"platform":"instagram","lang":"cs","text":"2-3 vety","hashtags":"10 tagu"},'
+        '{"platform":"instagram","lang":"en","text":"2-3 sentences","hashtags":"10 tags"},'
+        '{"platform":"tiktok","lang":"uk","text":"Скрипт 20-30с покроково","hashtags":"8 хештегiв","music":"назва музики"}'
+        ']}'
     )
     try:
         content = imgs + [{"type": "text", "text": prompt}]
-        r = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": content}]
-        )
-        raw = r.content[0].text.strip().replace("```json","").replace("```","").strip()
+        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": content}])
+        raw = r.content[0].text.strip().replace("\u0060\u0060\u0060json", "").replace("\u0060\u0060\u0060", "").strip()
         result = json.loads(raw)
         for post in result.get("posts", []):
-            icon = "📸" if post["platform"] == "instagram" else "🎬"
-            lang = post.get("lang","").upper()
-            music = f"\n\n🎵 {post['music']}" if post.get("music") else ""
-            msg = f"{icon} *{post['platform'].upper()} {lang}*\n\n{post.get('text','')}\n\n{post.get('hashtags','')}{music}"
+            icon = "\ud83d\udcf8" if post["platform"] == "instagram" else "\ud83c\udfa6"
+            lang = post.get("lang", "").upper()
+            music = f"\n\n\ud83c\udfb5 Музика: {post['music']}" if post.get("music") else ""
+            msg = f"{icon} *{post['platform'].upper()} {lang}*\n\n{post.get('text', '')}\n\n{post.get('hashtags', '')}{music}"
             await ctx.bot.send_message(chat_id, msg[:4096], parse_mode="Markdown")
         kb = [[InlineKeyboardButton("Новий пост", callback_data="new")]]
-        await ctx.bot.send_message(chat_id, "Готово! Копiюй i постав.", reply_markup=InlineKeyboardMarkup(kb))
+        await ctx.bot.send_message(chat_id, "Готово! Копiюй i публiкуй.", reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
-        await ctx.bot.send_message(chat_id, f"Помилка: {str(e)[:300]}\n/new - спробуй знову")
+        await ctx.bot.send_message(chat_id, f"Помилка: {str(e)[:300]}\n\nСпробуй /new")
     sessions[uid] = {"files": [], "desc": ""}
+
 
 async def btn(update, ctx):
     q = update.callback_query
@@ -117,16 +113,18 @@ async def btn(update, ctx):
         sessions[uid] = {"files": [], "desc": ""}
         await q.edit_message_text("Надсилай нове фото!")
 
+
 async def cmd_week(update, ctx):
     await update.message.reply_text("Генерую план на 7 днiв...")
-    p = f"{BRAND}\nПлан 7 днiв Instagram+TikTok щодня. Теми: стiл-зигзаг, стелаж, дверi, кухня, закулiсся, освiтнiй, промо.\nДень X (пн/вт...) - Тема\n📸 Instagram: iдея\n🎬 TikTok: сценарiй\n⏰ 18:00/19:30"
+    prompt = f"{BRAND}\nКонтент-план 7 днiв Instagram+TikTok. Теми: стiл-зигзаг, стелаж, дверi, кухня, закулiсся, освiтнiй, промо.\nДень X - Тема\n\ud83d\udcf8 Instagram: iдея\n\ud83c\udfa6 TikTok: сценарiй\n\u23f0 18:00/19:30"
     try:
-        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role":"user","content":p}])
+        r = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2000, messages=[{"role": "user", "content": prompt}])
         plan = r.content[0].text
         for i in range(0, min(len(plan), 8000), 4000):
-            await update.message.reply_text(plan[i:i+4000])
+            await update.message.reply_text(plan[i:i + 4000])
     except Exception as e:
         await update.message.reply_text(f"Помилка: {e}")
+
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -138,6 +136,7 @@ def main():
     app.add_handler(CallbackQueryHandler(btn))
     print("Bot running!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
